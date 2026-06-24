@@ -4,34 +4,48 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 def precompute_freqs_cis(dim, end, theta=10000.0, device='cpu'):
+    # theta values, we know theta = 10000^(2(i-1)/d) for i = 1,2,...,d/2
     freqs = 1.0/(theta**(torch.arange(0,dim,2,device=device)))
+    # these are the m, n values, the position of the embeddings
     t = torch.arange(end, device=device)
+    # to calculate the rotation matrix we need m*theta_i, so each m is multiplied with theta_i, 
+    # for i = 1,2,...,d/2, for m = 0,1,...,end-1, for that, we use torch.outer
     freqs = torch.outer(t, freqs)
+    #these freqs are m*theta_i
     cos = torch.cos(freqs)
     sin = torch.sin(freqs)
+    # cos , sin gives the elements of rotation matrix R
     return cos, sin
 
 def apply_rope(x, cos, sin):
+    # x: (B,T,H,D), this is query/ key
+    # x1 denotes even indices corresponding to last dimension of x
     x1 = x[..., ::2]
+    # x2 denotes odd indices corresponding to last dimension of x
     x2 = x[..., 1::2]
 
+    # cos and sin are precomputed for the maximum sequence length,
+    # so we need to slice them to match the current sequence length
+    # suppose cos and sin have shape (T, D/2), we need to unsqueeze them to (1, T, 1, D/2) for broadcasting
     cos = cos[: x.shape[1], :].unsqueeze(0).unsqueeze(2)
     sin = sin[: x.shape[1], :].unsqueeze(0).unsqueeze(2)
+    # Now we can apply the rotation to the even and odd parts of x, shape of x_rotated will be (B,T,H,D/2,2)
     x_rotated = torch.stack([
         x1 * cos - x2 * sin,
         x1 * sin + x2 * cos,
-    ], dim=-1)
-    return x_rotated.flatten(-2)
+    ], dim=-1) # the stack is creating a new dimension at the end.
+    return x_rotated.flatten(-2) #flattens the last two dimensions to get back to the shape (B, T, H, D) 
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-6):
         super().__init__()
         self.eps = eps
+        #learnable paraeters , works as the lambda factor in Layernorm
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
         norm = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(norm + self.eps)
+        x = x * torch.rsqrt(norm + self.eps) #rmsnorm = x/sqrt(mean(x^2) + eps)
         return self.weight * x
 
 class SwiGLU(nn.Module):
